@@ -26,10 +26,17 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 # VOC data location. The VOC2012 trainval archive ALREADY CONTAINS the
 # segmentation labels (SegmentationClass/ pngs + ImageSets/Segmentation/ split
-# lists), so the ~2 GB copy the detection projects downloaded serves this
-# project as-is. Reuse the first candidate that has VOC2012; otherwise data is
-# downloaded into this project's own dataset/data/ (gitignored).
+# lists), so any existing ~2 GB copy serves this project as-is. Reuse the first
+# candidate that has VOC2012; otherwise data is downloaded into this project's
+# own dataset/data/ (gitignored).
+#
+# The SIBLING seg projects (FCN / FCN_concat) come first: they hold BOTH
+# VOC2012 AND the SBD "aug" set, and the candidate that wins is also where SBD
+# is looked up (config.DATA_ROOT/sbd). The detection projects only ever had
+# VOC2012 (no SBD), so preferring a seg sibling avoids re-downloading SBD.
 _LOCAL_DATA = os.path.join(PROJECT_ROOT, "dataset", "data")
+_FCN_DATA = os.path.normpath(os.path.join(PROJECT_ROOT, "..", "FCN", "dataset", "data"))
+_FCN_CONCAT_DATA = os.path.normpath(os.path.join(PROJECT_ROOT, "..", "FCN_concat", "dataset", "data"))
 _YOLO3_DATA = os.path.normpath(
     os.path.join(
         PROJECT_ROOT, "..", "..", "[2]ObjectionDetection", "YOLO3", "PASCAL_VOC", "dataset", "data"
@@ -41,7 +48,7 @@ _FCOS_DATA = os.path.normpath(
     )
 )
 DATA_ROOT = _LOCAL_DATA
-for _cand in (_YOLO3_DATA, _FCOS_DATA, _LOCAL_DATA):
+for _cand in (_FCN_DATA, _FCN_CONCAT_DATA, _YOLO3_DATA, _FCOS_DATA, _LOCAL_DATA):
     if os.path.isdir(os.path.join(_cand, "VOCdevkit", "VOC2012")):
         DATA_ROOT = _cand
         break
