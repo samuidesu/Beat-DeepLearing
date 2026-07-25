@@ -44,7 +44,7 @@ import config
 from model.deeplab import DeepLab
 from losses.deeplab_loss import DeepLabLoss
 from dataset.voc import (VOCSegDataset, build_train_dataset, download_voc,
-                         voc_seg_present)
+                         voc_seg_present, sbd_present)
 from utils.metrics import ConfusionMatrix, compute_miou
 
 try:
@@ -104,10 +104,12 @@ def build_dataloaders(batch_size: int, num_workers: int, download: bool, device:
     Output:
         (train_loader, val_loader).
     """
-    # Fetch data when asked (--download) OR when it simply isn't there -- the
-    # normal situation on a fresh cloud machine, where no detection project's
-    # copy exists to be reused. Costs one directory check when data is present.
-    if download or not voc_seg_present():
+    # Fetch data when asked (--download) OR when anything is missing. Both
+    # VOC2012 AND SBD are checked: VOC can already exist (reused from a sibling
+    # project) while SBD does not, so gating on VOC alone would skip the SBD
+    # download and later crash in build_train_dataset(). download_voc() is
+    # idempotent -- it skips whichever half is already present.
+    if download or not voc_seg_present() or not sbd_present():
         download_voc()
 
     train_set = build_train_dataset()

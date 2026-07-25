@@ -30,8 +30,13 @@ How to download: python dataset/voc.py --download
 cloud run needs no separate step: `python train.py` alone is enough.)
 """
 
+import hashlib
+import math
 import os
+import shutil
 import sys
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 import torch
 from torch.utils.data import Dataset, ConcatDataset
@@ -163,6 +168,193 @@ _VOC2012_URLS = [
     "https://pjreddie.com/media/files/VOCtrainval_11-May-2012.tar",
 ]
 
+# SBD ("VOC aug") archive. torchvision's SBDataset(download=True) would fetch
+# this itself, but with a SINGLE connection and NO resume -- and the Berkeley
+# host throttles PER CONNECTION, so from far-away networks (e.g. mainland
+# China) one stream crawls at ~50 kB/s and 1.4 GB takes 7+ hours. We instead
+# fetch the archive ourselves with _download_segmented() below (N parallel
+# byte-range connections, each resumable), then hand over to SBDataset: it
+# sees the finished file, verifies the md5, SKIPS its own download and just
+# extracts. The md5 is torchvision's pinned value, so we and it agree on what
+# a "complete" archive is.
+_SBD_FILENAME = "benchmark.tgz"
+_SBD_MD5 = "82b4d87ceb2ed10f6038a1cba92111cb"
+_SBD_URLS = [
+    "https://www2.eecs.berkeley.edu/Research/Projects/CS/vision/grouping/semantic_contours/benchmark.tgz",
+]
+# Parallel byte-range connections. The speedup comes from the throttle being
+# per-connection: 16 throttled streams ~ 16x the single-stream speed. Raising
+# this further gives diminishing returns and risks the server refusing.
+_SBD_CONNECTIONS = 16
+
+
+# -----------------------------------------------------------------------------
+# Segmented (multi-connection) resumable downloader
+# -----------------------------------------------------------------------------
+def _md5_of(path: str) -> str:
+    """md5 hex digest of a file, streamed in 1 MB blocks (constant memory).
+
+    Input:  path to an existing file.
+    Output: 32-char lowercase hex digest string.
+    """
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def _probe_url(url: str):
+    """Ask the server for the file size and whether byte ranges are supported.
+
+    Sends a GET with "Range: bytes=0-0" (a 1-byte request):
+      * status 206 + "Content-Range: bytes 0-0/<total>"  -> ranges supported,
+        total parsed from after the "/".
+      * status 200 -> server ignored the Range header: single stream only,
+        total = Content-Length.
+
+    Input:  url to probe.
+    Output: (supports_ranges: bool, total_bytes: int).
+    """
+    req = urllib.request.Request(
+        url, headers={"Range": "bytes=0-0", "User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        if resp.status == 206:
+            total = int(resp.headers["Content-Range"].rsplit("/", 1)[-1])
+            return True, total
+        return False, int(resp.headers.get("Content-Length", 0))
+
+
+def _fetch_range(url, part_path, start, end, progress, retries: int = 3):
+    """Download bytes [start, end] (inclusive) of `url` into `part_path`.
+
+    Resumable: if part_path already holds k bytes from an earlier attempt,
+    the request asks for bytes start+k..end, so finished bytes are NEVER
+    re-downloaded -- a dropped connection costs nothing but the retry.
+
+    Input:
+        url, part_path: source and destination of this segment.
+        start, end: absolute byte offsets of the segment within the file.
+        progress: callable(n_new_bytes) -- called per chunk (thread-safe;
+            tqdm.update holds an internal lock).
+        retries: how many times to re-open a dropped connection.
+    """
+    expected = end - start + 1
+    last_err = None
+    for _ in range(retries):
+        have = os.path.getsize(part_path) if os.path.exists(part_path) else 0
+        if have > expected:
+            # Leftover from a run with a different split layout: start over.
+            os.remove(part_path)
+            have = 0
+        if have == expected:
+            return
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={"Range": f"bytes={start + have}-{end}",
+                         "User-Agent": "Mozilla/5.0"})
+            # "ab" append mode is what makes the resume work: each retry
+            # continues writing exactly where the last attempt stopped.
+            with urllib.request.urlopen(req, timeout=60) as resp, \
+                    open(part_path, "ab") as f:
+                for chunk in iter(lambda: resp.read(1 << 16), b""):
+                    f.write(chunk)
+                    progress(len(chunk))
+            if os.path.getsize(part_path) == expected:
+                return
+        except Exception as e:  # timeout / reset / 503 -> retry from `have`
+            last_err = e
+    raise RuntimeError(
+        f"segment {os.path.basename(part_path)} incomplete "
+        f"after {retries} attempts") from last_err
+
+
+def _download_segmented(url, dest, md5, connections: int = _SBD_CONNECTIONS):
+    """Multi-connection resumable download of `url` into `dest`, md5-verified.
+
+    How it works:
+      1. Probe the server: total size + byte-range support (no ranges -> falls
+         back to ONE resumable stream, still better than torchvision's).
+      2. Split [0, total) into `connections` equal segments, download them in
+         parallel threads into dest.part0..partN (each segment resumes its own
+         partial file, so Ctrl-C + rerun loses nothing).
+      3. Concatenate the parts into `dest`, delete the parts, verify the md5.
+
+    Input:
+        url: source URL.
+        dest: final file path (e.g. .../sbd/benchmark.tgz).
+        md5: expected hex digest; mismatch deletes the file and raises.
+        connections: number of parallel range requests.
+    """
+    # Already fully downloaded? (md5, not just size, so a truncated or corrupt
+    # file -- e.g. torchvision's aborted single-stream attempt -- never
+    # passes; it is removed and the segmented download starts cleanly.)
+    if os.path.exists(dest):
+        print(f"  found existing {os.path.basename(dest)}, checking md5...")
+        if _md5_of(dest) == md5:
+            print("  already complete (md5 OK), skipping download")
+            return
+        print("  incomplete/corrupt -> removing and re-downloading")
+        os.remove(dest)
+
+    supports_ranges, total = _probe_url(url)
+    if total <= 0:
+        raise RuntimeError(f"server reported no file size for {url}")
+    if not supports_ranges:
+        connections = 1  # degrade gracefully: one (still resumable) stream
+
+    # Split into `connections` contiguous segments covering [0, total).
+    part_size = math.ceil(total / connections)
+    ranges = [(i * part_size, min((i + 1) * part_size, total) - 1)
+              for i in range(connections)]
+    part_paths = [f"{dest}.part{i}" for i in range(len(ranges))]
+
+    # Bytes already on disk from a previous interrupted run (for the progress
+    # bar's starting point -- they will not be downloaded again).
+    already = sum(
+        min(os.path.getsize(p), e - s + 1)
+        for p, (s, e) in zip(part_paths, ranges) if os.path.exists(p))
+
+    try:
+        from tqdm import tqdm
+        bar = tqdm(total=total, initial=already, unit="B",
+                   unit_scale=True, desc=f"  {connections} connections")
+        progress = bar.update  # thread-safe (tqdm locks internally)
+    except ImportError:
+        bar = None
+
+        def progress(n):  # no tqdm -> silent (sizes printed at the end)
+            pass
+
+    try:
+        # One thread per segment; ThreadPoolExecutor's context manager joins
+        # them, and result() re-raises the first segment failure, if any.
+        with ThreadPoolExecutor(max_workers=len(ranges)) as pool:
+            futures = [
+                pool.submit(_fetch_range, url, p, s, e, progress)
+                for p, (s, e) in zip(part_paths, ranges)
+            ]
+            for f in futures:
+                f.result()
+    finally:
+        if bar is not None:
+            bar.close()
+
+    # Stitch the segments together in order, then clean up.
+    with open(dest, "wb") as out:
+        for p in part_paths:
+            with open(p, "rb") as f:
+                shutil.copyfileobj(f, out, 1 << 20)
+    for p in part_paths:
+        os.remove(p)
+
+    if _md5_of(dest) != md5:
+        os.remove(dest)
+        raise RuntimeError(
+            f"md5 mismatch for {dest} -- download corrupt, removed; rerun")
+    print(f"  downloaded {os.path.basename(dest)} ({total / 1e9:.2f} GB, md5 OK)")
+
 
 def voc_seg_present() -> bool:
     """True if the VOC2012 SEGMENTATION data is already extracted in DATA_ROOT.
@@ -172,6 +364,27 @@ def voc_seg_present() -> bool:
     """
     return os.path.isdir(os.path.join(
         config.DATA_ROOT, "VOCdevkit", "VOC2012", "SegmentationClass"))
+
+
+def sbd_present() -> bool:
+    """True if SBD is fully extracted and ready for SBDataset(download=False).
+
+    Probes the three things SBDataset needs after its own download step:
+      img/            extracted images
+      cls/            extracted .mat class masks
+      train_noval.txt the split list (a SEPARATE small download from JHU --
+                      NOT inside benchmark.tgz, which is why a manually-placed
+                      archive alone is not enough; the download step fetches it)
+
+    A partial benchmark.tgz on disk does NOT count as present -- extraction
+    must have completed. Kept in sync with the trigger in build_dataloaders so
+    a missing SBD forces download_voc() even when VOC2012 already exists.
+    """
+    if not config.USE_SBD:
+        return True  # SBD disabled -> nothing to download, treat as satisfied
+    sbd_root = os.path.join(config.DATA_ROOT, "sbd")
+    return all(os.path.exists(os.path.join(sbd_root, p))
+               for p in ("img", "cls", "train_noval.txt"))
 
 
 def download_voc():
@@ -212,18 +425,49 @@ def download_voc():
     # Optional SBD extra training data (config.USE_SBD).
     if config.USE_SBD:
         sbd_root = os.path.join(config.DATA_ROOT, "sbd")
-        print(f"Downloading SBD into: {sbd_root} (~1.4 GB, needs scipy)...")
-        from torchvision.datasets import SBDataset
-        try:
-            SBDataset(sbd_root, image_set="train_noval",
-                      mode="segmentation", download=True)
-        except Exception as e:
-            # SBD has a single (flaky) official host and no good mirror; give
-            # actionable instructions instead of a bare stack trace.
-            raise RuntimeError(
-                f"SBD download failed ({e}). Fetch benchmark.tgz manually "
-                f"and extract it under {sbd_root}, or set config.USE_SBD "
-                "= False to train on VOC2012 alone.") from e
+        # Fully extracted already? (img/ + cls/ + train_noval.txt) -> skip.
+        if sbd_present():
+            print(f"SBD already present at: {sbd_root} (skipping download)")
+        else:
+            print(f"Downloading SBD into: {sbd_root} (~1.4 GB, needs scipy)...")
+            os.makedirs(sbd_root, exist_ok=True)
+            archive = os.path.join(sbd_root, _SBD_FILENAME)
+
+            # Step 1: fetch benchmark.tgz ourselves -- segmented + resumable,
+            # ~connections-times faster than torchvision's single stream on
+            # per-connection-throttled links (see _download_segmented).
+            last_err = None
+            for url in _SBD_URLS:
+                try:
+                    _download_segmented(url, archive, _SBD_MD5)
+                    last_err = None
+                    break
+                except Exception as e:
+                    print(f"  failed: {e}")
+                    last_err = e
+            if last_err is not None:
+                raise RuntimeError(
+                    "SBD download failed on all mirrors. Fetch it manually "
+                    "with a multi-connection downloader, e.g.\n"
+                    f"  aria2c -x16 -s16 -c '{_SBD_URLS[0]}' "
+                    f"-d '{sbd_root}' -o {_SBD_FILENAME}\n"
+                    "then rerun (the finished file is detected and reused), "
+                    "or set config.USE_SBD = False to train on VOC2012 alone."
+                ) from last_err
+
+            # Step 2: hand over to torchvision. The archive is in place with
+            # the right md5, so SBDataset skips its own download and only
+            # extracts + arranges img/ cls/ train_noval.txt under sbd_root.
+            from torchvision.datasets import SBDataset
+            try:
+                SBDataset(sbd_root, image_set="train_noval",
+                          mode="segmentation", download=True)
+            except Exception as e:
+                raise RuntimeError(
+                    f"SBD extraction failed ({e}). If the error is about an "
+                    f"existing folder, delete {sbd_root} (KEEP a copy of "
+                    f"{_SBD_FILENAME} elsewhere and put it back) and rerun."
+                ) from e
     print("Done.")
 
 
