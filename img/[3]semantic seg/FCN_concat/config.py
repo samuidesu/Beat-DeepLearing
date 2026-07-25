@@ -28,12 +28,16 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 # project as-is. Reuse the first candidate that has VOC2012; otherwise data is
 # downloaded into this project's own dataset/data/ (gitignored).
 _LOCAL_DATA = os.path.join(PROJECT_ROOT, "dataset", "data")
-_YOLO3_DATA = os.path.normpath(os.path.join(
-    PROJECT_ROOT, "..", "..", "[2]ObjectionDetection", "YOLO3", "PASCAL_VOC",
-    "dataset", "data"))
-_FCOS_DATA = os.path.normpath(os.path.join(
-    PROJECT_ROOT, "..", "..", "[2]ObjectionDetection", "FCOS", "PASCAL_VOC",
-    "dataset", "data"))
+_YOLO3_DATA = os.path.normpath(
+    os.path.join(
+        PROJECT_ROOT, "..", "..", "[2]ObjectionDetection", "YOLO3", "PASCAL_VOC", "dataset", "data"
+    )
+)
+_FCOS_DATA = os.path.normpath(
+    os.path.join(
+        PROJECT_ROOT, "..", "..", "[2]ObjectionDetection", "FCOS", "PASCAL_VOC", "dataset", "data"
+    )
+)
 DATA_ROOT = _LOCAL_DATA
 for _cand in (_YOLO3_DATA, _FCOS_DATA, _LOCAL_DATA):
     if os.path.isdir(os.path.join(_cand, "VOCdevkit", "VOC2012")):
@@ -53,10 +57,26 @@ OUTPUT_DIR = os.path.join(PROJECT_ROOT, "outputs")
 # Do NOT reorder.
 VOC_SEG_CLASSES = [
     "background",
-    "aeroplane", "bicycle", "bird", "boat", "bottle",
-    "bus", "car", "cat", "chair", "cow",
-    "diningtable", "dog", "horse", "motorbike", "person",
-    "pottedplant", "sheep", "sofa", "train", "tvmonitor",
+    "aeroplane",
+    "bicycle",
+    "bird",
+    "boat",
+    "bottle",
+    "bus",
+    "car",
+    "cat",
+    "chair",
+    "cow",
+    "diningtable",
+    "dog",
+    "horse",
+    "motorbike",
+    "person",
+    "pottedplant",
+    "sheep",
+    "sofa",
+    "train",
+    "tvmonitor",
 ]
 NUM_CLASSES = len(VOC_SEG_CLASSES)  # 21
 
@@ -72,7 +92,7 @@ IGNORE_INDEX = 255
 # images) and typically lifts mIoU by several points. Off by default: it is a
 # separate ~1.4 GB download (mirror is flaky) and reading its .mat masks needs
 # scipy. See dataset/voc.py (SBDSegDataset) and the README.
-USE_SBD = False
+USE_SBD = True
 
 # -----------------------------------------------------------------------------
 # Image preprocessing
@@ -117,10 +137,10 @@ FPN_CHANNELS = 256
 # Training (identical two-stage protocol to the YOLO3 / FCOS projects)
 # -----------------------------------------------------------------------------
 SEED = 42
-DEVICE = "auto"          # "auto" -> cuda > mps > cpu ; or force "cuda"/"cpu"/"mps"
-BATCH_SIZE = 16          # of 480x480 crops; halve it if you hit OOM
+DEVICE = "auto"  # "auto" -> cuda > mps > cpu ; or force "cuda"/"cpu"/"mps"
+BATCH_SIZE = 16  # of 480x480 crops; halve it if you hit OOM
 NUM_WORKERS = 4
-WEIGHT_DECAY = 1e-3      # same as the detection projects
+WEIGHT_DECAY = 1e-3  # same as the detection projects
 
 # Two-stage finetuning schedule:
 #   Stage 1: freeze the whole backbone, train only neck + head (warm them up so
@@ -132,8 +152,8 @@ STAGE1_EPOCHS = 20
 STAGE1_LR = 1e-3
 
 STAGE2_EPOCHS = 60
-STAGE2_LR_HEAD = 1e-4         # lr for neck + head in stage 2
-STAGE2_LR_BACKBONE = 3e-5     # lr for the unfrozen backbone (the key knob)
+STAGE2_LR_HEAD = 1e-4  # lr for neck + head in stage 2
+STAGE2_LR_BACKBONE = 3e-5  # lr for the unfrozen backbone (the key knob)
 # "all" unfreezes the ENTIRE backbone; a tuple like ("layer3", "layer4")
 # unfreezes only those stages.
 STAGE2_UNFREEZE = "all"

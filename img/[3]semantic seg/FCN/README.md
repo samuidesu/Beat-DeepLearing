@@ -25,6 +25,10 @@
 
 实验 2 同时动了模型和数据两个变量,提升不能干净归因;证据倾向数据是大头,分析见实验 2 小节。
 
+> 后续单变量对照:[FCN_concat](../FCN_concat/) 在实验 2 的基础上只把 neck 融合从 add 换成 concat(通道配套收窄)——mIoU 0.6932 与实验 2 打平,但 neck+head 参数 −33%、每 epoch 快 ~20–25%,详见其 README。
+>
+> 系列第三个模型 [U-Net](../U-Net/):解码器整体换成经典 U-Net 三件套(concat + 转置卷积上采样 + 镜像通道,爬到 stride-2)——mIoU 0.6894,三种解码器全部打平;输出分辨率 8→4→2 翻两番,细结构类毫无改善,"分辨率瓶颈"假设结案,详见其 README。
+
 ### 实验 1:stride-8 输出 + 仅 VOC 1464 张(mIoU 0.5813)
 
 best checkpoint @ epoch 78:
@@ -300,4 +304,4 @@ FCN/
 - [ ] 单变量补跑:旧 stride-8 模型 + SBD,把实验 2 的 +0.11 拆成"数据的"与"结构的"
 - [ ] 消融:FPN 融合(等价 FCN-8s)vs 只用 c5 直接 32× 上采样(等价 FCN-32s),验证跳连的价值
 - [ ] 消融:末端上采样(实验 2 为 4×)bilinear vs nearest vs 转置卷积
-- [x] 观察每类 IoU:预判(bottle、bicycle、pottedplant 最差)只对一半——bicycle 0.31 / pottedplant 0.40 确实差,但 bottle 0.58 不垫底;最差是 cow 0.03 / chair 0.11,是语义近邻混淆(数据量问题)而非分辨率问题,见"结果"。stride-8 分辨率的真实代价、DeepLab(空洞卷积)/U-Net(更高分辨率解码)的对照,留到 SBD 补数据之后再做(实验 2 更新:SBD 后 cow 归位,证实混淆诊断;chair/sofa/bicycle 仍差,见"实验 2"观察 3)
+- [x] 观察每类 IoU:预判(bottle、bicycle、pottedplant 最差)只对一半——bicycle 0.31 / pottedplant 0.40 确实差,但 bottle 0.58 不垫底;最差是 cow 0.03 / chair 0.11,是语义近邻混淆(数据量问题)而非分辨率问题,见"结果"。stride-8 分辨率的真实代价、DeepLab(空洞卷积)/U-Net(更高分辨率解码)的对照,留到 SBD 补数据之后再做(实验 2 更新:SBD 后 cow 归位,证实混淆诊断;chair/sofa/bicycle 仍差,见"实验 2"观察 3。U-Net 对照已做:stride-2 解码也没救细结构,分辨率假设结案,见 ../U-Net)
