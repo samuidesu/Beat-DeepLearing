@@ -34,7 +34,7 @@ Two-stage finetune protocol (differs from the FCN project's -- see below):
 
 from __future__ import annotations
 
-from typing import Dict, Iterator, List
+from typing import Dict, Iterator, List, Sequence
 
 import torch
 import torch.nn as nn
@@ -44,24 +44,40 @@ import torch.nn as nn
 try:
     from .backbone import ResNetBackbone
     from .neck import DeepLabV1Neck
+    from .neckV2 import DeepLabV2ASPP
     from .head import DeepLabHead
 except ImportError:
     from backbone import ResNetBackbone
     from neck import DeepLabV1Neck
+    from neckV2 import DeepLabV2ASPP
     from head import DeepLabHead
 
 
 class DeepLab(nn.Module):
-    """ResNet-backbone DeepLab-v1 for PASCAL VOC 2012 semantic segmentation.
+    """ResNet-backbone DeepLab for PASCAL VOC 2012 semantic segmentation.
+
+    ONE model class serves both papers -- only the neck differs, so the neck
+    is selectable via `neck_type` while backbone, head and the finetune
+    protocol are shared:
+
+        "largefov" (DeepLab-v1): a single rate-12 atrous 3x3 conv (the neck.py
+            DeepLabV1Neck). One field of view.
+        "aspp" (DeepLab-v2): Atrous Spatial Pyramid Pooling -- several
+            parallel atrous 3x3 convs at different rates, summed (the
+            neckV2.py DeepLabV2ASPP). Multiple fields of view, so objects are
+            seen at multiple scales at once.
 
     Args:
         num_classes: 21 for VOC seg (20 object classes + background).
         pretrained: load ImageNet-pretrained backbone weights.
         backbone: backbone arch, "resnet18" or "resnet34".
-        neck_hidden_channels: width of the neck's atrous context conv (256).
-        neck_out_channels: width of the neck output / head input (128).
-        atrous_rate: dilation of the neck's LargeFOV 3x3 conv (12).
-        neck_dropout: spatial dropout inside the neck (0 disables).
+        neck_type: "largefov" (v1) or "aspp" (v2).
+        neck_hidden_channels: v1 only -- width of the LargeFOV atrous conv (256).
+        neck_out_channels: width of the neck output / head input (128). Shared.
+        atrous_rate: v1 only -- dilation of the LargeFOV 3x3 conv (12).
+        aspp_rates: v2 only -- the parallel branch dilations. (3, 6, 9, 12)
+            here (tighter than the paper's ASPP-L (6, 12, 18, 24)).
+        neck_dropout: spatial dropout inside the neck (0 disables). Shared.
     """
 
     def __init__(
@@ -69,25 +85,44 @@ class DeepLab(nn.Module):
         num_classes: int = 21,
         pretrained: bool = True,
         backbone: str = "resnet34",
+        neck_type: str = "largefov",
         neck_hidden_channels: int = 256,
         neck_out_channels: int = 128,
         atrous_rate: int = 12,
+        aspp_rates: Sequence[int] = (3, 6, 9, 12),
         neck_dropout: float = 0.1,
     ) -> None:
         super().__init__()
         self.num_classes = num_classes
+        self.neck_type = neck_type
 
         # Backbone -> ONE stride-8 feature map [B, 512, H/8, W/8].
         self.backbone = ResNetBackbone(arch=backbone, pretrained=pretrained)
 
-        # Neck: LargeFOV atrous context layer, 512 -> 256 -> 128 channels.
-        self.neck = DeepLabV1Neck(
-            in_channels=self.backbone.out_channels,
-            hidden_channels=neck_hidden_channels,
-            out_channels=neck_out_channels,
-            atrous_rate=atrous_rate,
-            dropout=neck_dropout,
-        )
+        # Neck: pick the context module. Both consume the 512-channel stride-8
+        # feature and emit neck_out_channels at the same stride, so the head
+        # (which sizes itself off neck.out_channels) is identical either way.
+        if neck_type == "largefov":
+            # DeepLab-v1: one rate-12 atrous conv, 512 -> 256 -> 128.
+            self.neck = DeepLabV1Neck(
+                in_channels=self.backbone.out_channels,
+                hidden_channels=neck_hidden_channels,
+                out_channels=neck_out_channels,
+                atrous_rate=atrous_rate,
+                dropout=neck_dropout,
+            )
+        elif neck_type == "aspp":
+            # DeepLab-v2: parallel multi-rate atrous convs summed, 512 -> 128.
+            self.neck = DeepLabV2ASPP(
+                in_channels=self.backbone.out_channels,
+                out_channels=neck_out_channels,
+                rates=aspp_rates,
+                dropout=neck_dropout,
+            )
+        else:
+            raise ValueError(
+                f"unknown neck_type {neck_type!r}; "
+                "choose 'largefov' (v1) or 'aspp' (v2)")
 
         # Head: 1x1 per-pixel classifier + bilinear resize to input size.
         self.head = DeepLabHead(
@@ -183,17 +218,21 @@ class DeepLab(nn.Module):
 # ---- Quick self-test: run this file directly to verify shapes ---------------
 # python model/deeplab.py
 if __name__ == "__main__":
-    # pretrained=False avoids a network download for this shape check.
-    model = DeepLab(num_classes=21, pretrained=False)
     dummy = torch.randn(2, 3, 416, 416)
-    out = model(dummy)
-    print("logits:", tuple(out.shape), "(expected (2, 21, 416, 416))")
 
-    n_total = sum(p.numel() for p in model.parameters())
-    n_train = sum(p.numel() for p in model.trainable_parameters())
-    print(f"params: total={n_total/1e6:.2f}M  trainable={n_train/1e6:.2f}M")
+    # Build BOTH neck variants and confirm they produce identical output
+    # shapes (only the param count and the internal neck differ).
+    for neck_type in ("largefov", "aspp"):
+        # pretrained=False avoids a network download for this shape check.
+        model = DeepLab(num_classes=21, pretrained=False, neck_type=neck_type)
+        out = model(dummy)
+        n_total = sum(p.numel() for p in model.parameters())
+        print(f"[{neck_type}] logits: {tuple(out.shape)} "
+              f"(expected (2, 21, 416, 416))  total params={n_total/1e6:.2f}M")
 
-    # Stage-1 freeze check: low backbone frozen, high backbone + neck/head on.
+    # Stage-1 freeze check on the v2 model: low backbone frozen, high backbone
+    # + neck/head on. (parameter_groups() is neck-agnostic, so this validates
+    # the ASPP neck's params land in the neck_head group.)
     model.freeze_backbone_low()
     groups = model.parameter_groups()
     for name, params in groups.items():

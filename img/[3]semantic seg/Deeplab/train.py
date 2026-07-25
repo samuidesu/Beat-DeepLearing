@@ -250,8 +250,18 @@ def run_stage(stage_id, model, train_loader, val_loader, criterion, optimizer,
         t0 = time.time()
 
         desc = f"[stage {stage_id}] epoch {e}/{epochs}"
-        # Read the LR BEFORE training/stepping so it reflects the LR actually
-        # used this epoch (scheduler.step() below changes it for the next one).
+        # Read the LRs BEFORE training/stepping so they reflect the LRs
+        # actually used this epoch (scheduler.step() below changes them for
+        # the next one). With layered LRs there are 2-3 param groups, each on
+        # its own cosine schedule; log EVERY group. build_layered_optimizer
+        # tags each group with a "name" (neck_head / backbone_high /
+        # backbone_low); fall back to a positional label if some optimizer
+        # didn't set one.
+        group_lrs = {
+            g.get("name", f"group{i}"): g["lr"]
+            for i, g in enumerate(optimizer.param_groups)
+        }
+        # First group == neck_head; keep a scalar "lr" for back-compat.
         lr = optimizer.param_groups[0]["lr"]
         train_metrics = train_one_epoch(model, train_loader, criterion, optimizer, device, desc)
         # Val loss + mIoU in one pass (proxy over EVAL_MAX_BATCHES images).
@@ -264,6 +274,8 @@ def run_stage(stage_id, model, train_loader, val_loader, criterion, optimizer,
             "epoch": global_epoch,
             "stage": stage_id,
             "lr": lr,
+            # One field per param group: lr_neck_head / lr_backbone_high / ...
+            **{f"lr_{name}": v for name, v in group_lrs.items()},
             "time_sec": round(time.time() - t0, 1),
             "timestamp": time.strftime("%m-%d %H:%M:%S"),  # wall-clock at epoch end
             **{f"train_{k}": v for k, v in train_metrics.items()},
@@ -273,8 +285,10 @@ def run_stage(stage_id, model, train_loader, val_loader, criterion, optimizer,
         }
         history.append(record)
 
+        # Compact per-group LR string, e.g. "neck_head=1.00e-04 backbone_high=3.00e-05".
+        lr_str = " ".join(f"{name}={v:.2e}" for name, v in group_lrs.items())
         print(
-            f"[{record['timestamp']}] {desc}  lr={lr:.2e}  "
+            f"[{record['timestamp']}] {desc}  lr[{lr_str}]  "
             f"train_total={train_metrics.get('total', 0):.4f}  "
             f"val_total={val_metrics.get('total', 0):.4f}  "
             f"mIoU={val_metrics['miou']:.4f}  "

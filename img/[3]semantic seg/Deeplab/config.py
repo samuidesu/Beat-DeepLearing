@@ -54,7 +54,11 @@ for _cand in (_FCN_DATA, _FCN_CONCAT_DATA, _YOLO3_DATA, _FCOS_DATA, _LOCAL_DATA)
         break
 
 # Logs, curves, checkpoints go here.
+# OUTPUT_DIR   -> DeepLab-v1 (LargeFOV neck), written by train.py.
+# OUTPUT_DIR_V2 -> DeepLab-v2 (ASPP neck),     written by trainv2.py.
+# Separate folders so a v2 run never overwrites the v1 best.pt / log / curves.
 OUTPUT_DIR = os.path.join(PROJECT_ROOT, "outputs")
+OUTPUT_DIR_V2 = os.path.join(PROJECT_ROOT, "outputsv2")
 
 # -----------------------------------------------------------------------------
 # Dataset: PASCAL VOC 2012 segmentation (21 classes)
@@ -142,11 +146,20 @@ IMAGENET_STD = [0.229, 0.224, 0.225]
 # resnet34 = the FCN experiment's choice, kept for comparability.
 BACKBONE = "resnet34"
 
-# Neck (LargeFOV atrous context layer): 512 -> hidden -> out channels.
-NECK_HIDDEN_CHANNELS = 256   # width of the rate-12 atrous 3x3 conv output
+# Neck output width + dropout are SHARED by both neck variants.
 NECK_OUT_CHANNELS = 128      # width handed to the head's 1x1 classifier
-ATROUS_RATE = 12             # dilation of the LargeFOV conv (DeepLab-v1 value)
 NECK_DROPOUT = 0.1           # spatial dropout inside the neck; 0 disables
+
+# --- DeepLab-v1 neck (LargeFOV, used by train.py) ---
+NECK_HIDDEN_CHANNELS = 256   # width of the rate-12 atrous 3x3 conv output
+ATROUS_RATE = 12             # dilation of the LargeFOV conv (DeepLab-v1 value)
+
+# --- DeepLab-v2 neck (ASPP, used by trainv2.py) ---
+# Parallel atrous 3x3 branches at these dilations, summed. (3, 6, 9, 12) keeps
+# the fields of view tighter than the paper's ASPP-L (6, 12, 18, 24) -- denser
+# sampling that biases toward finer / smaller structures, which suits VOC's
+# many thin objects (bicycle, chair, pottedplant).
+ASPP_RATES = (3, 6, 9, 12)
 
 # -----------------------------------------------------------------------------
 # Training
