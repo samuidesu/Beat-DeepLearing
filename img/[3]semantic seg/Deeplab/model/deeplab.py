@@ -1,0 +1,201 @@
+"""Full DeepLab-v1-style model: dilated ResNet -> LargeFOV neck -> head.
+
+Forward pass:
+    image [B, 3, H, W]
+      --backbone-->  c5   [B, 512, H/8, W/8]   dilated ResNet, output stride 8
+      --neck------>  feat [B, 128, H/8, W/8]   LargeFOV atrous context (rate 12)
+      --head------>  logits [B, 21, H, W]      1x1 classify + 8x bilinear resize
+
+The model returns RAW logits (no softmax) at full input resolution. Training
+feeds them straight into nn.CrossEntropyLoss(ignore_index=255); inference
+takes argmax over dim 1 to get the per-pixel class-id mask.
+
+Contrast with this repo's FCN project -- same task, opposite strategy:
+
+    FCN:     backbone downsamples to stride 32, an FPN neck fuses 4 taps back
+             up to stride 4, then 4x upsample.  "Lose resolution, rebuild it."
+    DeepLab: backbone never drops below stride 8 (strides in layer3/4 replaced
+             by dilation), so ONE output, NO fusion neck, just 8x upsample.
+             "Never lose the resolution in the first place."
+
+Two-stage finetune protocol (differs from the FCN project's -- see below):
+
+    Stage 1: freeze only the LOW backbone (stem/layer1/layer2); train the
+             dilation-modified HIGH stages (layer3/layer4) together with the
+             new neck/head. Rationale: layer3/4's geometry was surgically
+             changed (stride -> dilation), so their pretrained weights need to
+             adapt anyway -- no point keeping them frozen while the neck/head
+             warm up on features that are themselves about to shift.
+    Stage 2: unfreeze the ENTIRE backbone and finetune end-to-end with
+             LAYERED learning rates (low backbone slowest, high backbone
+             middle, neck/head fastest) -- the deeper you are into pretrained
+             territory, the gentler the updates.
+"""
+
+from __future__ import annotations
+
+from typing import Dict, Iterator, List
+
+import torch
+import torch.nn as nn
+
+# Package-relative imports when used as `model.deeplab`; plain imports when
+# this file is run directly as a script.
+try:
+    from .backbone import ResNetBackbone
+    from .neck import DeepLabV1Neck
+    from .head import DeepLabHead
+except ImportError:
+    from backbone import ResNetBackbone
+    from neck import DeepLabV1Neck
+    from head import DeepLabHead
+
+
+class DeepLab(nn.Module):
+    """ResNet-backbone DeepLab-v1 for PASCAL VOC 2012 semantic segmentation.
+
+    Args:
+        num_classes: 21 for VOC seg (20 object classes + background).
+        pretrained: load ImageNet-pretrained backbone weights.
+        backbone: backbone arch, "resnet18" or "resnet34".
+        neck_hidden_channels: width of the neck's atrous context conv (256).
+        neck_out_channels: width of the neck output / head input (128).
+        atrous_rate: dilation of the neck's LargeFOV 3x3 conv (12).
+        neck_dropout: spatial dropout inside the neck (0 disables).
+    """
+
+    def __init__(
+        self,
+        num_classes: int = 21,
+        pretrained: bool = True,
+        backbone: str = "resnet34",
+        neck_hidden_channels: int = 256,
+        neck_out_channels: int = 128,
+        atrous_rate: int = 12,
+        neck_dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
+        self.num_classes = num_classes
+
+        # Backbone -> ONE stride-8 feature map [B, 512, H/8, W/8].
+        self.backbone = ResNetBackbone(arch=backbone, pretrained=pretrained)
+
+        # Neck: LargeFOV atrous context layer, 512 -> 256 -> 128 channels.
+        self.neck = DeepLabV1Neck(
+            in_channels=self.backbone.out_channels,
+            hidden_channels=neck_hidden_channels,
+            out_channels=neck_out_channels,
+            atrous_rate=atrous_rate,
+            dropout=neck_dropout,
+        )
+
+        # Head: 1x1 per-pixel classifier + bilinear resize to input size.
+        self.head = DeepLabHead(
+            in_ch=self.neck.out_channels,
+            num_classes=num_classes,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the segmenter.
+
+        Input:
+            x: image batch [B, 3, H, W] (H, W ideally multiples of 8 so the
+                stride-8 grid is exact; the eval pipeline pads to guarantee it).
+
+        Output:
+            raw per-pixel class logits [B, num_classes, H, W].
+        """
+        # Remember the input's spatial size: the head interpolates the logits
+        # back to EXACTLY this size, so prediction and label mask always align.
+        input_size = x.shape[-2:]                 # (H, W)
+
+        c5 = self.backbone(x)                     # [B, 512, H/8, W/8]
+        feat = self.neck(c5)                      # [B, 128, H/8, W/8]
+        logits = self.head(feat, input_size)      # [B, 21,  H,   W]
+        return logits
+
+    # ---- Two-stage finetuning helpers ---------------------------------------
+    def freeze_backbone_low(self):
+        """Stage 1: freeze ONLY stem/layer1/layer2.
+
+        The dilation-modified high stages (layer3/layer4) stay trainable
+        alongside the new neck/head -- their pretrained weights must adapt to
+        the new atrous geometry anyway.
+        """
+        self.backbone.freeze_low_layers()
+
+    def unfreeze_backbone_all(self):
+        """Stage 2: unfreeze the ENTIRE backbone for the layered-LR finetune."""
+        self.backbone.unfreeze()
+
+    def parameter_groups(self) -> Dict[str, List[nn.Parameter]]:
+        """Split parameters into the three layered-LR groups.
+
+        Output (dict of lists, ready for torch.optim param_groups):
+            "backbone_low":  stem + layer1 + layer2   (slowest LR -- pristine
+                             pretrained low-level features)
+            "backbone_high": layer3 + layer4          (middle LR -- pretrained
+                             but geometry-modified)
+            "neck_head":     neck + head              (fastest LR -- trained
+                             from scratch)
+
+        Frozen parameters (requires_grad=False) are EXCLUDED, so the same
+        call works for both stages: in stage 1 "backbone_low" simply comes
+        back empty.
+        """
+        groups: Dict[str, List[nn.Parameter]] = {
+            "backbone_low": [
+                p for p in self.backbone.low_level_parameters()
+                if p.requires_grad
+            ],
+            "backbone_high": [
+                p for p in self.backbone.high_level_parameters()
+                if p.requires_grad
+            ],
+            "neck_head": [
+                p for m in (self.neck, self.head)
+                for p in m.parameters()
+                if p.requires_grad
+            ],
+        }
+        return groups
+
+    def set_bn_eval_on_frozen(self):
+        """Keep BatchNorm layers whose params are frozen in eval mode.
+
+        Call this AFTER model.train() each epoch. model.train() flips every BN
+        back to training mode, which would let frozen layers keep updating
+        their running mean/var -- undesirable. This restores eval mode for any
+        BN whose affine weights are frozen, preserving the pretrained stats.
+        (In stage 1 that is stem/layer1/layer2's BNs; in stage 2, none.)
+        """
+        for m in self.modules():
+            if isinstance(m, nn.BatchNorm2d):
+                # A frozen BN has requires_grad == False on its weight.
+                if m.weight is not None and not m.weight.requires_grad:
+                    m.eval()
+
+    def trainable_parameters(self) -> Iterator[nn.Parameter]:
+        """Yield only the parameters that currently require gradients."""
+        return (p for p in self.parameters() if p.requires_grad)
+
+
+# ---- Quick self-test: run this file directly to verify shapes ---------------
+# python model/deeplab.py
+if __name__ == "__main__":
+    # pretrained=False avoids a network download for this shape check.
+    model = DeepLab(num_classes=21, pretrained=False)
+    dummy = torch.randn(2, 3, 416, 416)
+    out = model(dummy)
+    print("logits:", tuple(out.shape), "(expected (2, 21, 416, 416))")
+
+    n_total = sum(p.numel() for p in model.parameters())
+    n_train = sum(p.numel() for p in model.trainable_parameters())
+    print(f"params: total={n_total/1e6:.2f}M  trainable={n_train/1e6:.2f}M")
+
+    # Stage-1 freeze check: low backbone frozen, high backbone + neck/head on.
+    model.freeze_backbone_low()
+    groups = model.parameter_groups()
+    for name, params in groups.items():
+        n = sum(p.numel() for p in params) / 1e6
+        print(f"stage-1 group {name}: {n:.2f}M trainable")
