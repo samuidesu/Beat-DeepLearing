@@ -99,11 +99,16 @@ class DeepLab(nn.Module):
         # Backbone -> ONE stride-8 feature map [B, 512, H/8, W/8].
         self.backbone = ResNetBackbone(arch=backbone, pretrained=pretrained)
 
-        # Neck: pick the context module. Both consume the 512-channel stride-8
-        # feature and emit neck_out_channels at the same stride, so the head
-        # (which sizes itself off neck.out_channels) is identical either way.
+        # Neck: pick the context module. The two necks now differ in WHERE
+        # classification happens, so the head differs too:
+        #   largefov -> neck emits neck_out_channels FEATURES; a separate head
+        #               does the 1x1 classify + upsample.
+        #   aspp     -> each branch emits num_classes SCORES directly and the
+        #               neck sums + upsamples them, so there is NO head (the
+        #               branches are the classifier). self.head stays None and
+        #               forward() calls the neck with the target size instead.
         if neck_type == "largefov":
-            # DeepLab-v1: one rate-12 atrous conv, 512 -> 256 -> 128.
+            # DeepLab-v1: one rate-12 atrous conv, 512 -> 256 -> 128 features.
             self.neck = DeepLabV1Neck(
                 in_channels=self.backbone.out_channels,
                 hidden_channels=neck_hidden_channels,
@@ -111,24 +116,27 @@ class DeepLab(nn.Module):
                 atrous_rate=atrous_rate,
                 dropout=neck_dropout,
             )
+            # Head: 1x1 per-pixel classifier + bilinear resize to input size.
+            self.head = DeepLabHead(
+                in_ch=self.neck.out_channels,
+                num_classes=num_classes,
+            )
         elif neck_type == "aspp":
-            # DeepLab-v2: parallel multi-rate atrous convs summed, 512 -> 128.
+            # DeepLab-v2: parallel multi-rate atrous branches, each emitting
+            # num_classes scores; summed and upsampled inside the neck.
+            # neck_out_channels becomes the branches' internal (hidden) width.
             self.neck = DeepLabV2ASPP(
                 in_channels=self.backbone.out_channels,
-                out_channels=neck_out_channels,
+                num_classes=num_classes,
+                hidden_channels=neck_out_channels,
                 rates=aspp_rates,
                 dropout=neck_dropout,
             )
+            self.head = None  # ASPP predicts logits directly -- no head.
         else:
             raise ValueError(
                 f"unknown neck_type {neck_type!r}; "
                 "choose 'largefov' (v1) or 'aspp' (v2)")
-
-        # Head: 1x1 per-pixel classifier + bilinear resize to input size.
-        self.head = DeepLabHead(
-            in_ch=self.neck.out_channels,
-            num_classes=num_classes,
-        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Run the segmenter.
@@ -145,8 +153,13 @@ class DeepLab(nn.Module):
         input_size = x.shape[-2:]                 # (H, W)
 
         c5 = self.backbone(x)                     # [B, 512, H/8, W/8]
-        feat = self.neck(c5)                      # [B, 128, H/8, W/8]
-        logits = self.head(feat, input_size)      # [B, 21,  H,   W]
+        if self.head is None:
+            # ASPP (v2): the neck classifies AND upsamples in one shot.
+            logits = self.neck(c5, input_size)    # [B, 21,  H,   W]
+        else:
+            # LargeFOV (v1): neck -> features, head -> classify + upsample.
+            feat = self.neck(c5)                  # [B, 128, H/8, W/8]
+            logits = self.head(feat, input_size)  # [B, 21,  H,   W]
         return logits
 
     # ---- Two-stage finetuning helpers ---------------------------------------
@@ -188,7 +201,7 @@ class DeepLab(nn.Module):
                 if p.requires_grad
             ],
             "neck_head": [
-                p for m in (self.neck, self.head)
+                p for m in (self.neck, self.head) if m is not None
                 for p in m.parameters()
                 if p.requires_grad
             ],

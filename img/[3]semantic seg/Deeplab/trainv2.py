@@ -42,6 +42,8 @@ from train import (
     build_dataloaders,
     run_stage,
     save_log,
+    collect_run_meta,
+    summarize_result,
     plot_curves,
     build_layered_optimizer,
     count_trainable,
@@ -127,7 +129,14 @@ def main():
                          scheduler, args.epochs_stage2, device, history, best, output_dir)
 
     # ---- Save logs + curves ----
-    save_log(history, output_dir)
+    # Snapshot the config + training params alongside the per-epoch history.
+    # Only difference vs. train.py: the model name + the neck-specific fields.
+    meta = collect_run_meta(
+        args, device, train_loader, val_loader,
+        model_name="DeepLab-v2 (ASPP)",
+        neck={"neck_type": "aspp", "aspp_rates": list(config.ASPP_RATES)})
+    meta["best_proxy"] = {"miou": round(best["miou"], 4), "epoch": best["epoch"]}
+    save_log(history, output_dir, meta)
     plot_curves(history, output_dir)
     print(f"\nDone. Best mIoU={best['miou']:.4f} @ epoch {best['epoch']}")
     print(f"Artifacts written to: {output_dir}")
@@ -137,7 +146,10 @@ def main():
     if os.path.exists(best_path):
         model.load_state_dict(torch.load(best_path, map_location=device))
         print("\nComputing full mIoU on VOC2012 val (best checkpoint)...")
-        compute_miou(model, val_loader, device)  # verbose: per-class table
+        result = compute_miou(model, val_loader, device)  # verbose: per-class table
+        # Record the full-set result in the log too, then re-save.
+        meta["final_full_val"] = summarize_result(result)
+        save_log(history, output_dir, meta)
 
 
 if __name__ == "__main__":

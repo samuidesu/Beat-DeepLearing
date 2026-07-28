@@ -314,10 +314,81 @@ def run_stage(stage_id, model, train_loader, val_loader, criterion, optimizer,
 # -----------------------------------------------------------------------------
 # Logging / plotting
 # -----------------------------------------------------------------------------
-def save_log(history, output_dir):
-    """Write the full per-epoch history to outputs/training_log.json."""
+def save_log(history, output_dir, meta=None):
+    """Write the run to outputs/training_log.json.
+
+    With `meta` (the config + training-param snapshot from collect_run_meta),
+    the file is {"meta": {...}, "history": [...per-epoch...]} so a run is fully
+    reproducible from its log alone. Without it, the bare history list is
+    written (back-compat with older logs).
+    """
+    payload = {"meta": meta, "history": history} if meta is not None else history
     with open(os.path.join(output_dir, "training_log.json"), "w") as f:
-        json.dump(history, f, indent=2)
+        json.dump(payload, f, indent=2)
+
+
+def collect_run_meta(args, device, train_loader, val_loader, *, model_name, neck):
+    """Snapshot the run's config + training params for training_log.json.
+
+    Records enough to reproduce the run from the log alone: data/preproc knobs,
+    model/neck hyperparams, and the two-stage layered-LR schedule. `neck` holds
+    the variant-specific fields (largefov: hidden/atrous_rate; aspp: rates), so
+    train.py and trainv2.py share this one helper.
+    """
+    return {
+        "model": model_name,
+        "started": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "device": str(device),
+        "seed": config.SEED,
+        "data": {
+            "data_root": config.DATA_ROOT,
+            "use_sbd": config.USE_SBD,
+            "train_images": len(train_loader.dataset),
+            "train_batches": len(train_loader),
+            "val_images": len(val_loader.dataset),
+            "batch_size": args.batch_size,
+            "num_workers": args.num_workers,
+            "crop_size": config.CROP_SIZE,
+            "scale_range": list(config.SCALE_RANGE),
+            "size_divisor": config.SIZE_DIVISOR,
+        },
+        "model_cfg": {
+            "backbone": config.BACKBONE,
+            "num_classes": config.NUM_CLASSES,
+            "ignore_index": config.IGNORE_INDEX,
+            "neck_out_channels": config.NECK_OUT_CHANNELS,
+            "neck_dropout": config.NECK_DROPOUT,
+            **neck,
+        },
+        "optim": {
+            "weight_decay": config.WEIGHT_DECAY,
+            "eval_max_batches": config.EVAL_MAX_BATCHES,
+            "epochs_stage1": args.epochs_stage1,
+            "epochs_stage2": args.epochs_stage2,
+            "stage1_lr_head": config.STAGE1_LR_HEAD,
+            "stage1_lr_backbone_high": config.STAGE1_LR_BACKBONE_HIGH,
+            "stage2_lr_head": config.STAGE2_LR_HEAD,
+            "stage2_lr_backbone_high": config.STAGE2_LR_BACKBONE_HIGH,
+            "stage2_lr_backbone_low": config.STAGE2_LR_BACKBONE_LOW,
+        },
+    }
+
+
+def summarize_result(result):
+    """Compact a compute_miou() dict for the log (NaN per-class IoU -> null).
+
+    json.dump would emit a bare `NaN` token (invalid JSON) for absent classes,
+    so those are mapped to None; scalars are rounded for readability.
+    """
+    return {
+        "miou": round(result["miou"], 4),
+        "pixel_acc": round(result["pixel_acc"], 4),
+        "mean_acc": round(result["mean_acc"], 4),
+        "per_class_iou": {
+            name: (None if v != v else round(v, 4))
+            for name, v in zip(config.VOC_SEG_CLASSES, result["per_class_iou"])
+        },
+    }
 
 
 def plot_curves(history, output_dir):
@@ -491,7 +562,15 @@ def main():
                          scheduler, args.epochs_stage2, device, history, best, config.OUTPUT_DIR)
 
     # ---- Save logs + curves ----
-    save_log(history, config.OUTPUT_DIR)
+    # Snapshot the config + training params alongside the per-epoch history.
+    meta = collect_run_meta(
+        args, device, train_loader, val_loader,
+        model_name="DeepLab-v1 (LargeFOV)",
+        neck={"neck_type": "largefov",
+              "neck_hidden_channels": config.NECK_HIDDEN_CHANNELS,
+              "atrous_rate": config.ATROUS_RATE})
+    meta["best_proxy"] = {"miou": round(best["miou"], 4), "epoch": best["epoch"]}
+    save_log(history, config.OUTPUT_DIR, meta)
     plot_curves(history, config.OUTPUT_DIR)
     print(f"\nDone. Best mIoU={best['miou']:.4f} @ epoch {best['epoch']}")
     print(f"Artifacts written to: {config.OUTPUT_DIR}")
@@ -501,7 +580,10 @@ def main():
     if os.path.exists(best_path):
         model.load_state_dict(torch.load(best_path, map_location=device))
         print("\nComputing full mIoU on VOC2012 val (best checkpoint)...")
-        compute_miou(model, val_loader, device)  # verbose: per-class table
+        result = compute_miou(model, val_loader, device)  # verbose: per-class table
+        # Record the full-set result in the log too, then re-save.
+        meta["final_full_val"] = summarize_result(result)
+        save_log(history, config.OUTPUT_DIR, meta)
 
 if __name__ == "__main__":
     main()
