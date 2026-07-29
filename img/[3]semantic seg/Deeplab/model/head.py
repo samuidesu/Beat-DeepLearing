@@ -76,7 +76,7 @@ class DeepLabHead(nn.Module):
             nn.CrossEntropyLoss(ignore_index=255). At inference, argmax over
             dim 1 gives the predicted class id per pixel.
         """
-        logits = self.classifier(feat)          # [B, 21, H/8, W/8]
+        logits = self.classifier(feat)  # [B, 21, H/8, W/8]
 
         # Bilinear, not nearest: nearest would copy every stride-8 logit into
         # a blocky 8x8 tile (jagged mask borders); bilinear interpolates

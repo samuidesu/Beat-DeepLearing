@@ -54,11 +54,13 @@ for _cand in (_FCN_DATA, _FCN_CONCAT_DATA, _YOLO3_DATA, _FCOS_DATA, _LOCAL_DATA)
         break
 
 # Logs, curves, checkpoints go here.
-# OUTPUT_DIR   -> DeepLab-v1 (LargeFOV neck), written by train.py.
+# OUTPUT_DIR    -> DeepLab-v1 (LargeFOV neck), written by train.py.
 # OUTPUT_DIR_V2 -> DeepLab-v2 (ASPP neck),     written by trainv2.py.
-# Separate folders so a v2 run never overwrites the v1 best.pt / log / curves.
+# OUTPUT_DIR_V3 -> DeepLab-v3 (ASPP + global pooling), written by trainV3.py.
+# Separate folders so no run ever overwrites another's best.pt / log / curves.
 OUTPUT_DIR = os.path.join(PROJECT_ROOT, "outputs")
 OUTPUT_DIR_V2 = os.path.join(PROJECT_ROOT, "outputsv2")
+OUTPUT_DIR_V3 = os.path.join(PROJECT_ROOT, "outputsv3")
 
 # -----------------------------------------------------------------------------
 # Dataset: PASCAL VOC 2012 segmentation (21 classes)
@@ -160,6 +162,15 @@ ATROUS_RATE = 12             # dilation of the LargeFOV conv (DeepLab-v1 value)
 # sampling that biases toward finer / smaller structures, which suits VOC's
 # many thin objects (bicycle, chair, pottedplant).
 ASPP_RATES = (3, 6, 9, 12)
+
+# --- DeepLab-v3 neck (ASPP + image-level pooling, used by trainV3.py) ---
+# Atrous 3x3 branches at these dilations; a 1x1 branch and a global-average-
+# pooling branch are added automatically (so 3 rates -> 5 branches total).
+# (3, 6, 9) keeps the fields of view tight, like the v2 choice; the paper's
+# output-stride-8 values are the wider (12, 24, 36). Unlike v2 the branches
+# emit FEATURES that are concatenated and fused by a head, not summed scores.
+ASPP_V3_RATES = (3, 6, 9)
+ASPP_V3_HIDDEN = 256   # per-branch feature width AND the head projection width
 
 # -----------------------------------------------------------------------------
 # Training

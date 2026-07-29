@@ -32,9 +32,11 @@ from train import get_device  # reuse the device picker
 
 def parse_args():
     p = argparse.ArgumentParser(description="Evaluate DeepLab (mIoU) on VOC2012 seg val")
-    p.add_argument("--neck", choices=["largefov", "aspp"], default="largefov",
+    p.add_argument("--neck", choices=["largefov", "aspp", "aspp_v3"],
+                   default="largefov",
                    help="neck the checkpoint was trained with: largefov (v1, "
-                        "train.py) or aspp (v2, trainv2.py). MUST match.")
+                        "train.py), aspp (v2, trainv2.py) or aspp_v3 (v3, "
+                        "trainV3.py). MUST match the checkpoint.")
     p.add_argument("--weights", default=None,
                    help="checkpoint path (default: best.pt in the folder "
                         "matching --neck)")
@@ -51,9 +53,13 @@ def main():
     print(f"Device: {device}")
 
     # Default the weights path to the folder matching the neck choice:
-    # outputs/ for v1 (largefov), outputsv2/ for v2 (aspp).
+    # outputs/ (v1), outputsv2/ (v2), outputsv3/ (v3).
     if args.weights is None:
-        out_dir = config.OUTPUT_DIR_V2 if args.neck == "aspp" else config.OUTPUT_DIR
+        out_dir = {
+            "largefov": config.OUTPUT_DIR,
+            "aspp": config.OUTPUT_DIR_V2,
+            "aspp_v3": config.OUTPUT_DIR_V3,
+        }[args.neck]
         args.weights = os.path.join(out_dir, "best.pt")
 
     # Val set = VOC2012 seg val at original resolution (padded to /8),
@@ -65,8 +71,9 @@ def main():
 
     # Build model and load weights (pretrained=False: the checkpoint already
     # contains trained weights, no need to fetch ImageNet ones first).
-    # Pass both v1 and v2 neck params; DeepLab uses only the ones that match
-    # neck_type (largefov reads hidden_channels/atrous_rate, aspp reads rates).
+    # Pass every neck's params; DeepLab uses only the ones matching neck_type
+    # (largefov -> hidden_channels/atrous_rate, aspp -> aspp_rates,
+    # aspp_v3 -> aspp_v3_rates/aspp_v3_hidden).
     model = DeepLab(num_classes=config.NUM_CLASSES,
                     pretrained=False, backbone=config.BACKBONE,
                     neck_type=args.neck,
@@ -74,6 +81,8 @@ def main():
                     neck_out_channels=config.NECK_OUT_CHANNELS,
                     atrous_rate=config.ATROUS_RATE,
                     aspp_rates=config.ASPP_RATES,
+                    aspp_v3_rates=config.ASPP_V3_RATES,
+                    aspp_v3_hidden=config.ASPP_V3_HIDDEN,
                     neck_dropout=config.NECK_DROPOUT).to(device)
     state = torch.load(args.weights, map_location=device)
     model.load_state_dict(state)
