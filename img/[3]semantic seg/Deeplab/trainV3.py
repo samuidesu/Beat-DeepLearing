@@ -18,12 +18,27 @@ overrides only:
     * the model         -> DeepLab(neck_type="aspp_v3", ...)
     * the output folder  -> config.OUTPUT_DIR_V3 (outputsv3/, its own folder)
 
-Run it exactly like the others:
-    python trainV3.py                       # config.py defaults
+Optional Multi-Grid backbone (DeepLab-v3's layer4 block-level atrous rates):
+    --multi-grid          swaps in model/backbone_v3_multigrid.py. OFF by
+                          default, so a plain `python trainV3.py` reproduces the
+                          exact same experiment as before. Multi-Grid runs write
+                          to outputsv3_mg/ so they never clobber the plain-v3
+                          results.
+    --output-stride 8|16  backbone output stride (only meaningful with
+                          --multi-grid; the plain backbone is always 8).
+
+Stage 2 is skippable: --epochs-stage2 0 trains stage 1 only (the stage blocks
+are guarded by `epochs > 0`).
+
+Run it:
+    python trainV3.py                            # plain v3, config defaults
     python trainV3.py --epochs-stage1 32 --epochs-stage2 30
+    python trainV3.py --multi-grid               # v3 + Multi-Grid layer4
+    python trainV3.py --multi-grid --epochs-stage2 0   # MG, stage 1 only
     python trainV3.py --download --device cpu
 
-Compare afterwards: outputs/ (v1) vs. outputsv2/ (v2) vs. outputsv3/ (v3).
+Compare afterwards: outputs/ (v1) vs. outputsv2/ (v2) vs. outputsv3/ (v3)
+vs. outputsv3_mg/ (v3 + Multi-Grid).
 """
 
 import os
@@ -62,7 +77,18 @@ def parse_args():
     p.add_argument("--batch-size", type=int, default=config.BATCH_SIZE)
     p.add_argument("--num-workers", type=int, default=config.NUM_WORKERS)
     p.add_argument("--epochs-stage1", type=int, default=config.STAGE1_EPOCHS)
-    p.add_argument("--epochs-stage2", type=int, default=config.STAGE2_EPOCHS)
+    p.add_argument("--epochs-stage2", type=int, default=config.STAGE2_EPOCHS,
+                   help="stage-2 epochs; 0 skips stage 2 (train stage 1 only)")
+    p.add_argument("--multi-grid", action="store_true",
+                   help="use the Multi-Grid layer4 backbone "
+                        "(backbone_v3_multigrid.py); OFF = plain dilated backbone")
+    p.add_argument("--output-stride", type=int, default=config.OUTPUT_STRIDE,
+                   choices=[8, 16],
+                   help="backbone output stride (only used with --multi-grid)")
+    p.add_argument("--output-dir", default=None,
+                   help="output folder name/path. Default: outputsv3/ (or "
+                        "outputsv3_mg/ with --multi-grid). A bare name is placed "
+                        "under the project root; an absolute path is used as-is.")
     return p.parse_args()
 
 
@@ -71,12 +97,20 @@ def main():
     set_seed(config.SEED)
     device = get_device(args.device)
 
-    # v3 writes to its OWN folder so it never clobbers v1/v2 best.pt / log / curves.
-    output_dir = config.OUTPUT_DIR_V3
+    # Output folder. --output-dir overrides everything (a bare name lands under
+    # the project root, next to outputs*/; an absolute path is used verbatim).
+    # Otherwise: v3 writes to its OWN folder so it never clobbers v1/v2, and
+    # Multi-Grid runs get the "_mg" suffix so plain-v3 and MG sit side by side.
+    if args.output_dir:
+        output_dir = (args.output_dir if os.path.isabs(args.output_dir)
+                      else os.path.join(config.PROJECT_ROOT, args.output_dir))
+    else:
+        output_dir = config.OUTPUT_DIR_V3 + ("_mg" if args.multi_grid else "")
     os.makedirs(output_dir, exist_ok=True)
+    variant = "Multi-Grid backbone" if args.multi_grid else "plain dilated backbone"
     print(f"Device: {device}")
     print(f"Data root: {config.DATA_ROOT}")
-    print(f"Output dir: {output_dir}  (DeepLab-v3, ASPP + global pooling)")
+    print(f"Output dir: {output_dir}  (DeepLab-v3, ASPP + global pooling, {variant})")
 
     # ---- Data ----
     train_loader, val_loader = build_dataloaders(
@@ -84,16 +118,25 @@ def main():
     print(f"Train batches: {len(train_loader)}  Val images: {len(val_loader)}")
 
     # ---- Model + loss ----
-    # The ONLY substantive change vs. train.py: neck_type="aspp_v3" (+ rates/hidden).
+    # Changes vs. train.py: neck_type="aspp_v3" and the optional Multi-Grid
+    # backbone. When --multi-grid is off, multi_grid=False makes DeepLab build
+    # the plain backbone -> identical to the earlier v3 experiment.
     model = DeepLab(num_classes=config.NUM_CLASSES,
                     pretrained=True, backbone=config.BACKBONE,
                     neck_type="aspp_v3",
                     aspp_v3_rates=config.ASPP_V3_RATES,
                     aspp_v3_hidden=config.ASPP_V3_HIDDEN,
-                    neck_dropout=config.NECK_DROPOUT).to(device)
+                    neck_dropout=config.NECK_DROPOUT,
+                    multi_grid=args.multi_grid,
+                    output_stride=args.output_stride,
+                    block4_multi_grid=config.BLOCK4_MULTI_GRID).to(device)
     criterion = DeepLabLoss(ignore_index=config.IGNORE_INDEX).to(device)
     print(f"ASPP-v3 rates: {config.ASPP_V3_RATES} (+ 1x1 + global pooling)  "
           f"hidden: {config.ASPP_V3_HIDDEN}")
+    if args.multi_grid:
+        print(f"Multi-Grid: layer4 units {config.BLOCK4_MULTI_GRID}  "
+              f"output_stride {args.output_stride}  "
+              f"-> layer4 dilations {model.backbone.block4_actual_dilations}")
 
     history = []
     best = {"miou": -1.0, "epoch": -1}
@@ -117,7 +160,11 @@ def main():
                          scheduler, args.epochs_stage1, device, history, best, output_dir)
 
     # ---- Stage 2: unfreeze the whole backbone, layered-LR finetune ----
-    if args.epochs_stage2 > 0:
+    # Skipped entirely when --epochs-stage2 0: the best checkpoint is then
+    # whatever stage 1 produced (frozen low backbone).
+    if args.epochs_stage2 <= 0:
+        print("\n=== Stage 2 skipped (--epochs-stage2 0) ===")
+    else:
         print("\n=== Stage 2: unfreeze ALL, layered-LR finetune ===")
         model.unfreeze_backbone_all()
         print(f"Trainable params: {count_trainable(model):.2f}M")
@@ -135,12 +182,20 @@ def main():
 
     # ---- Save logs + curves ----
     # Snapshot the config + training params alongside the per-epoch history.
+    neck_meta = {"neck_type": "aspp_v3",
+                 "aspp_v3_rates": list(config.ASPP_V3_RATES),
+                 "aspp_v3_hidden": config.ASPP_V3_HIDDEN,
+                 "multi_grid": args.multi_grid}
+    if args.multi_grid:
+        # Record the ACTUAL layer4 dilations so the log is self-explaining.
+        neck_meta["output_stride"] = args.output_stride
+        neck_meta["block4_multi_grid"] = list(config.BLOCK4_MULTI_GRID)
+        neck_meta["block4_actual_dilations"] = list(model.backbone.block4_actual_dilations)
     meta = collect_run_meta(
         args, device, train_loader, val_loader,
-        model_name="DeepLab-v3 (ASPP + global pooling)",
-        neck={"neck_type": "aspp_v3",
-              "aspp_v3_rates": list(config.ASPP_V3_RATES),
-              "aspp_v3_hidden": config.ASPP_V3_HIDDEN})
+        model_name="DeepLab-v3 (ASPP + global pooling)"
+                   + (" + Multi-Grid" if args.multi_grid else ""),
+        neck=neck_meta)
     meta["best_proxy"] = {"miou": round(best["miou"], 4), "epoch": best["epoch"]}
     save_log(history, output_dir, meta)
     plot_curves(history, output_dir)

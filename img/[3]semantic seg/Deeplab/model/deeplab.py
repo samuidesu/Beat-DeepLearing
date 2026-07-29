@@ -43,6 +43,7 @@ import torch.nn as nn
 # this file is run directly as a script.
 try:
     from .backbone import ResNetBackbone
+    from .backbone_v3_multigrid import ResNetBackbone as MultiGridResNetBackbone
     from .neck import DeepLabV1Neck
     from .neckV2 import DeepLabV2ASPP
     from .neckV3 import DeepLabV3ASPP
@@ -50,6 +51,7 @@ try:
     from .headV3 import DeepLabHeadV3
 except ImportError:
     from backbone import ResNetBackbone
+    from backbone_v3_multigrid import ResNetBackbone as MultiGridResNetBackbone
     from neck import DeepLabV1Neck
     from neckV2 import DeepLabV2ASPP
     from neckV3 import DeepLabV3ASPP
@@ -90,6 +92,15 @@ class DeepLab(nn.Module):
         aspp_v3_hidden: v3 only -- per-branch feature width AND the head's
             projection width (256).
         neck_dropout: spatial dropout inside the neck/head (0 disables). Shared.
+        multi_grid: if True, build the Multi-Grid backbone
+            (backbone_v3_multigrid.py) whose layer4 uses block-level atrous
+            rates instead of a single dilation (DeepLab-v3's Multi-Grid). If
+            False (default), the plain dilated backbone is used -- so existing
+            v1/v2/v3 runs are unchanged.
+        output_stride: backbone output stride, 8 (default) or 16. Only consulted
+            when multi_grid is True (the plain backbone is always stride 8).
+        block4_multi_grid: layer4 block-level unit rates when multi_grid is True
+            (paper default (1, 2, 4) for ResNet-34's three layer4 blocks).
     """
 
     def __init__(
@@ -105,13 +116,28 @@ class DeepLab(nn.Module):
         aspp_v3_rates: Sequence[int] = (3, 6, 9),
         aspp_v3_hidden: int = 256,
         neck_dropout: float = 0.1,
+        multi_grid: bool = False,
+        output_stride: int = 8,
+        block4_multi_grid: Sequence[int] = (1, 2, 4),
     ) -> None:
         super().__init__()
         self.num_classes = num_classes
         self.neck_type = neck_type
+        self.multi_grid = multi_grid
 
-        # Backbone -> ONE stride-8 feature map [B, 512, H/8, W/8].
-        self.backbone = ResNetBackbone(arch=backbone, pretrained=pretrained)
+        # Backbone -> ONE feature map [B, 512, H/os, W/os]. Two builds share the
+        # same interface (out_channels, freeze/unfreeze, low/high_level_parameters),
+        # so everything downstream is agnostic to which one is used:
+        #   multi_grid=False -> plain dilated ResNet, always output stride 8.
+        #   multi_grid=True  -> layer4 Multi-Grid backbone, output stride 8 or 16.
+        if multi_grid:
+            self.backbone = MultiGridResNetBackbone(
+                arch=backbone, pretrained=pretrained,
+                output_stride=output_stride,
+                block4_multi_grid=block4_multi_grid,
+            )
+        else:
+            self.backbone = ResNetBackbone(arch=backbone, pretrained=pretrained)
 
         # Neck: pick the context module. The variants differ in WHERE
         # classification happens, so the head wiring differs too:
@@ -277,6 +303,15 @@ if __name__ == "__main__":
         n_total = sum(p.numel() for p in model.parameters())
         print(f"[{neck_type}] logits: {tuple(out.shape)} "
               f"(expected (2, 21, 416, 416))  total params={n_total/1e6:.2f}M")
+
+    # v3 + Multi-Grid backbone: same output shape, layer4 uses block-level
+    # dilations instead of one. (Only the backbone changes; neck/head identical.)
+    mg = DeepLab(num_classes=21, pretrained=False, neck_type="aspp_v3",
+                 multi_grid=True, output_stride=8)
+    out = mg(dummy)
+    print(f"[aspp_v3 + multi_grid] logits: {tuple(out.shape)} "
+          f"(expected (2, 21, 416, 416))  "
+          f"layer4 dilations={mg.backbone.block4_actual_dilations}")
 
     # Stage-1 freeze check on the v3 model: low backbone frozen, high backbone
     # + neck/head on. (parameter_groups() is neck-agnostic, so this validates

@@ -37,9 +37,18 @@ def parse_args():
                    help="neck the checkpoint was trained with: largefov (v1, "
                         "train.py), aspp (v2, trainv2.py) or aspp_v3 (v3, "
                         "trainV3.py). MUST match the checkpoint.")
+    p.add_argument("--multi-grid", action="store_true",
+                   help="the checkpoint used the Multi-Grid backbone (trainV3 "
+                        "--multi-grid). MUST match: Multi-Grid changes only "
+                        "dilation attributes, not weight shapes, so a mismatch "
+                        "loads silently but evaluates with the wrong dilations.")
+    p.add_argument("--output-stride", type=int, default=config.OUTPUT_STRIDE,
+                   choices=[8, 16],
+                   help="backbone output stride the checkpoint used "
+                        "(only with --multi-grid)")
     p.add_argument("--weights", default=None,
                    help="checkpoint path (default: best.pt in the folder "
-                        "matching --neck)")
+                        "matching --neck / --multi-grid)")
     p.add_argument("--device", default=config.DEVICE)
     p.add_argument("--num-workers", type=int, default=config.NUM_WORKERS)
     p.add_argument("--max-batches", type=int, default=None,
@@ -53,13 +62,16 @@ def main():
     print(f"Device: {device}")
 
     # Default the weights path to the folder matching the neck choice:
-    # outputs/ (v1), outputsv2/ (v2), outputsv3/ (v3).
+    # outputs/ (v1), outputsv2/ (v2), outputsv3/ (v3). A Multi-Grid v3 run
+    # lives in outputsv3_mg/ (the "_mg" suffix trainV3 adds).
     if args.weights is None:
         out_dir = {
             "largefov": config.OUTPUT_DIR,
             "aspp": config.OUTPUT_DIR_V2,
             "aspp_v3": config.OUTPUT_DIR_V3,
         }[args.neck]
+        if args.neck == "aspp_v3" and args.multi_grid:
+            out_dir += "_mg"
         args.weights = os.path.join(out_dir, "best.pt")
 
     # Val set = VOC2012 seg val at original resolution (padded to /8),
@@ -83,7 +95,10 @@ def main():
                     aspp_rates=config.ASPP_RATES,
                     aspp_v3_rates=config.ASPP_V3_RATES,
                     aspp_v3_hidden=config.ASPP_V3_HIDDEN,
-                    neck_dropout=config.NECK_DROPOUT).to(device)
+                    neck_dropout=config.NECK_DROPOUT,
+                    multi_grid=args.multi_grid,
+                    output_stride=args.output_stride,
+                    block4_multi_grid=config.BLOCK4_MULTI_GRID).to(device)
     state = torch.load(args.weights, map_location=device)
     model.load_state_dict(state)
     print(f"Loaded weights: {args.weights}")

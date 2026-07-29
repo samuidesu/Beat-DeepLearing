@@ -172,6 +172,13 @@ ASPP_RATES = (3, 6, 9, 12)
 ASPP_V3_RATES = (3, 6, 9)
 ASPP_V3_HIDDEN = 256   # per-branch feature width AND the head projection width
 
+# --- DeepLab-v3 Multi-Grid backbone (optional; model/backbone_v3_multigrid.py) ---
+# Multi-Grid gives layer4 block-level atrous rates instead of one dilation. It
+# is OPT-IN via trainV3.py's --multi-grid flag (default OFF, so the existing v3
+# experiment is unchanged). These two knobs only take effect when it is on:
+OUTPUT_STRIDE = 8            # backbone output stride with Multi-Grid: 8 or 16
+BLOCK4_MULTI_GRID = (1, 2, 4)  # layer4 block-level unit rates (ResNet-34: 3 blocks)
+
 # -----------------------------------------------------------------------------
 # Training
 # -----------------------------------------------------------------------------
