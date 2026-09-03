@@ -1,0 +1,217 @@
+{
+  "meta": {
+    "model": "BiLSTM (last pooling)",
+    "device": "cuda",
+    "seed": 42,
+    "data": {
+      "data_root": "C:\\code\\beatDL\\text\\1_text_classification\\AG-News\\dataset\\data",
+      "train_docs": 114000,
+      "train_batches": 891,
+      "val_docs": 6000,
+      "val_ratio": 0.05,
+      "split_seed": 1234,
+      "batch_size": 128,
+      "eval_batch_size": 256,
+      "num_workers": 0,
+      "vocab_size": 45618,
+      "min_freq": 2,
+      "max_len": 128,
+      "label_counts": {
+        "World": 28500,
+        "Sports": 28500,
+        "Business": 28500,
+        "Sci/Tech": 28500
+      },
+      "val_unk_rate": 0.0091
+    },
+    "model_cfg": {
+      "cell": "lstm",
+      "embed_dim": 100,
+      "hidden_size": 256,
+      "num_layers": 2,
+      "bidirectional": true,
+      "pooling": "last",
+      "dropout": 0.5,
+      "num_classes": 4,
+      "glove": true,
+      "glove_path": "C:\\code\\beatDL\\text\\1_text_classification\\SST-2\\dataset\\data\\glove\\glove.6B.100d.txt",
+      "glove_coverage": 0.8995
+    },
+    "optim": {
+      "optimizer": "Adam",
+      "weight_decay": 0.0001,
+      "grad_clip": 5.0,
+      "label_smoothing": 0.05,
+      "epochs_stage1": 5,
+      "epochs_stage2": 3,
+      "stage1_lr_head": 0.001,
+      "stage1_lr_encoder": 0.001,
+      "stage2_lr_head": 0.0003,
+      "stage2_lr_encoder": 0.0003,
+      "stage2_lr_embedding": 5e-05
+    },
+    "started": "2026-09-03 15:49:44",
+    "finished": "2026-09-03 15:53:41",
+    "best_val": {
+      "accuracy": 0.9205,
+      "epoch": 8
+    },
+    "final_val": {
+      "accuracy": 0.9205,
+      "macro_f1": 0.9204,
+      "per_class": {
+        "World": {
+          "precision": 0.9394,
+          "recall": 0.92,
+          "f1": 0.9296,
+          "support": 1500
+        },
+        "Sports": {
+          "precision": 0.966,
+          "recall": 0.9847,
+          "f1": 0.9752,
+          "support": 1500
+        },
+        "Business": {
+          "precision": 0.9031,
+          "recall": 0.876,
+          "f1": 0.8893,
+          "support": 1500
+        },
+        "Sci/Tech": {
+          "precision": 0.8739,
+          "recall": 0.9013,
+          "f1": 0.8874,
+          "support": 1500
+        }
+      },
+      "matrix": [
+        [
+          1380,
+          27,
+          42,
+          51
+        ],
+        [
+          12,
+          1477,
+          7,
+          4
+        ],
+        [
+          33,
+          13,
+          1314,
+          140
+        ],
+        [
+          44,
+          12,
+          92,
+          1352
+        ]
+      ]
+    }
+  },
+  "history": [
+    {
+      "epoch": 1,
+      "stage": 1,
+      "lr_head": 0.001,
+      "lr_encoder": 0.001,
+      "time_sec": 37.8,
+      "timestamp": "09-03 15:50:23",
+      "train_loss": 0.5139828682866013,
+      "val_loss": 0.44391291189193727,
+      "accuracy": 0.8968333333333334,
+      "macro_f1": 0.8965425444596572
+    },
+    {
+      "epoch": 2,
+      "stage": 1,
+      "lr_head": 0.0009045084971874737,
+      "lr_encoder": 0.0009045084971874737,
+      "time_sec": 36.6,
+      "timestamp": "09-03 15:50:59",
+      "train_loss": 0.4535746187745479,
+      "val_loss": 0.41549955304463704,
+      "accuracy": 0.9068333333333334,
+      "macro_f1": 0.9065580497617141
+    },
+    {
+      "epoch": 3,
+      "stage": 1,
+      "lr_head": 0.0006545084971874737,
+      "lr_encoder": 0.0006545084971874737,
+      "time_sec": 30.5,
+      "timestamp": "09-03 15:51:30",
+      "train_loss": 0.43415693230378,
+      "val_loss": 0.4050447596708934,
+      "accuracy": 0.9093333333333333,
+      "macro_f1": 0.9093010742768953
+    },
+    {
+      "epoch": 4,
+      "stage": 1,
+      "lr_head": 0.00034549150281252633,
+      "lr_encoder": 0.00034549150281252633,
+      "time_sec": 25.4,
+      "timestamp": "09-03 15:51:55",
+      "train_loss": 0.4180871820366173,
+      "val_loss": 0.39973366586367287,
+      "accuracy": 0.913,
+      "macro_f1": 0.9129180175655853
+    },
+    {
+      "epoch": 5,
+      "stage": 1,
+      "lr_head": 9.549150281252633e-05,
+      "lr_encoder": 9.549150281252633e-05,
+      "time_sec": 25.8,
+      "timestamp": "09-03 15:52:21",
+      "train_loss": 0.40886798672508773,
+      "val_loss": 0.39176424519220987,
+      "accuracy": 0.9176666666666666,
+      "macro_f1": 0.9174751861544058
+    },
+    {
+      "epoch": 6,
+      "stage": 2,
+      "lr_head": 0.0003,
+      "lr_encoder": 0.0003,
+      "lr_embedding": 5e-05,
+      "time_sec": 27.0,
+      "timestamp": "09-03 15:52:48",
+      "train_loss": 0.40968327589620623,
+      "val_loss": 0.39682948700586956,
+      "accuracy": 0.916,
+      "macro_f1": 0.9157888588057759
+    },
+    {
+      "epoch": 7,
+      "stage": 2,
+      "lr_head": 0.000225,
+      "lr_encoder": 0.000225,
+      "lr_embedding": 3.7500000000000003e-05,
+      "time_sec": 26.7,
+      "timestamp": "09-03 15:53:15",
+      "train_loss": 0.40412693774909303,
+      "val_loss": 0.38868583846092225,
+      "accuracy": 0.9191666666666667,
+      "macro_f1": 0.919213858450628
+    },
+    {
+      "epoch": 8,
+      "stage": 2,
+      "lr_head": 7.500000000000003e-05,
+      "lr_encoder": 7.500000000000003e-05,
+      "lr_embedding": 1.2500000000000007e-05,
+      "time_sec": 26.8,
+      "timestamp": "09-03 15:53:41",
+      "train_loss": 0.3974379859639887,
+      "val_loss": 0.38480635404586794,
+      "accuracy": 0.9205,
+      "macro_f1": 0.9204039104094681
+    }
+  ]
+}
